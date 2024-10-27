@@ -15,13 +15,13 @@ bertopic:
   min_topic_size: 10
   min_similarity: 0.7
 
-hardware: GPU
+hardware: CPU
 
 reddit:
-  client_id: 'voiLhjY_Q0uJwzVwU9Xbhg'
-  client_secret: 'dP7Ws55HLQUoSYpXkOzkzEPjqyuGtg'
+  client_id: 'client_id'
+  client_secret: 'client_secret'
   redirect_uri: 'http://127.0.0.1:3000/profile'
   user_agent: 'r_aus_astro by Due_recordings9516'
 
 ausreddit:
-  api_key: 'arVriwhiLgZQ9FGw7Nin'  
+  api_key: 'api_key'  

@@ -229,7 +229,7 @@ class DataImporter:
             print("The database file does not exist.")
 
 #make llama ccp implementation, investigate onnx, make yaml switch for starting local llm as required.
-class OpenAIProcessor:
+class AIProcessor:
     def __init__(self, table_name, db_path = 'temp.db'):
         self.db_path = db_path
         self.table_name = table_name
