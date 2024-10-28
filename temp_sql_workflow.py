@@ -274,7 +274,7 @@ class AIProcessor:
         """Process text with OpenAI API"""
         try:
             output = self.client.chat.completions.create(
-                model="gpt-4-turbo-preview",
+                model="gpt-4o",
                 messages=[
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": user_prompt},
@@ -293,59 +293,96 @@ class AIProcessor:
     def process_table_llm(self, table_name: str, input_column: str, output_column: str, 
                          key: str, batch_size: int, system_prompt: str, 
                          user_prompt_template: str, rows_to_process: str | int = 'all'):
-        """Process table using LLM with the specified parameters"""
-        conn = sqlite3.connect(self.db_path)
-        cur = conn.cursor()
-
-        # Add new column if it doesn't exist
-        try:
-            cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {output_column} TEXT")
-        except sqlite3.OperationalError:
-            pass
-
-        # Get total rows
-        total_rows = cur.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-        rows_to_process = (total_rows if rows_to_process == 'all' 
-                          else min(int(rows_to_process), total_rows))
-
-        # Process rows with progress bar
-        with tqdm(total=rows_to_process, desc="Processing rows", unit="row") as pbar:
-            for offset in range(0, rows_to_process, batch_size):
-                current_batch_size = min(batch_size, rows_to_process - offset)
-                cur.execute(
-                    f"SELECT {key}, {input_column} FROM {table_name} "
-                    f"LIMIT {current_batch_size} OFFSET {offset}"
-                )
-                rows = cur.fetchall()
-
-                for row in rows:
-                    row_id, input_text = row
-                    user_prompt = user_prompt_template.format(input_text=input_text)
-                    
-                    # Process text using OpenAI if available, otherwise use fallback
-                    if self.client:
-                        completion = self._process_with_openai(
-                            system_prompt, user_prompt
-                        )
-                    else:
-                        completion = self._process_without_openai(
-                            system_prompt, user_prompt
-                        )
-
-                    # Update database
+            """Process table using LLM with the specified parameters
+            
+            Args:
+                table_name (str): Name of the table to process
+                input_column (str): Column containing text to analyze
+                output_column (str): Column to store results
+                key (str): Primary key column name
+                batch_size (int): Number of rows to process in each batch
+                system_prompt (str): System prompt for LLM context
+                user_prompt_template (str): Template for user prompt with {input_text} placeholder
+                rows_to_process (str | int): Number of rows to process, 'all' for entire table
+            """
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            
+            # Add new column if it doesn't exist
+            try:
+                cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {output_column} TEXT")
+            except sqlite3.OperationalError:
+                pass
+                
+            # Get total rows
+            total_rows = cur.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
+            rows_to_process = (total_rows if rows_to_process == 'all' 
+                              else min(int(rows_to_process), total_rows))
+            
+            # Validate prompt template
+            if "{input_text}" not in user_prompt_template:
+                raise ValueError("user_prompt_template must contain {input_text} placeholder")
+            
+            # Process rows with progress bar
+            with tqdm(total=rows_to_process, desc="Processing rows", unit="row") as pbar:
+                for offset in range(0, rows_to_process, batch_size):
+                    current_batch_size = min(batch_size, rows_to_process - offset)
+                    # Only fetch rows where output_column is NULL or empty
                     cur.execute(
-                        f"UPDATE {table_name} SET {output_column} = ? "
-                        f"WHERE {key} = ?", 
-                        (completion, row_id)
+                        f"""
+                        SELECT {key}, {input_column} FROM {table_name}
+                        WHERE ({output_column} IS NULL OR trim({output_column}) = '')
+                        LIMIT {current_batch_size} OFFSET {offset}
+                        """
                     )
-                    pbar.update(1)
-
-                conn.commit()
-
-                if offset + current_batch_size >= rows_to_process:
-                    break
-
-        conn.close()
+                    rows = cur.fetchall()
+                    
+                    if not rows:  # Skip if no rows need processing
+                        continue
+                        
+                    for row in rows:
+                        row_id, input_text = row
+                        
+                        # Skip if input text is empty
+                        if not input_text or input_text.isspace():
+                            pbar.update(1)
+                            continue
+                            
+                        try:
+                            # Format the user prompt with the actual input text
+                            formatted_user_prompt = user_prompt_template.format(input_text=input_text)
+                            
+                            # Process text using OpenAI if available, otherwise use fallback
+                            if self.client:
+                                completion = self._process_with_openai(
+                                    system_prompt=system_prompt,
+                                    user_prompt=formatted_user_prompt
+                                )
+                            else:
+                                completion = self._process_without_openai(
+                                    system_prompt=system_prompt,
+                                    user_prompt=formatted_user_prompt
+                                )
+                                
+                            # Update database with result
+                            cur.execute(
+                                f"UPDATE {table_name} SET {output_column} = ? WHERE {key} = ?",
+                                (completion, row_id)
+                            )
+                            
+                        except Exception as e:
+                            print(f"Error processing row {row_id}: {str(e)}")
+                            continue
+                            
+                        finally:
+                            pbar.update(1)
+                            
+                    conn.commit()
+                    
+                    if offset + current_batch_size >= rows_to_process:
+                        break
+                        
+            conn.close()
 
     def read_from_sqlite(self, table_name):
         conn = sqlite3.connect(self.db_path)

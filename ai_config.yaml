@@ -27,4 +27,4 @@ ausreddit:
   api_key: 'api_key'
 
 open_ai:
-  api_key: 'api_key'   
+  api_key: 'api_key'  
