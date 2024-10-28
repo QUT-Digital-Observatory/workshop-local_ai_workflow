@@ -24,4 +24,7 @@ reddit:
   user_agent: 'r_aus_astro by Due_recordings9516'
 
 ausreddit:
-  api_key: 'api_key'  
+  api_key: 'api_key'
+
+open_ai:
+  api_key: 'api_key'   

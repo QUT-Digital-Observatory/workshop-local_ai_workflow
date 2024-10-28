@@ -13,15 +13,7 @@ from bertopic import BERTopic
 import torch
 from sentence_transformers import SentenceTransformer
 import ollama
-from typing import List, Union
-
-os.environ["OPENAI_API_KEY"] = "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"
-
-client = OpenAI()
-
-nlp = spacy.load("en_core_web_trf")
-
-embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+from typing import List, Union, Optional
 
 def load_config(config_path: str) -> dict:
     """
@@ -31,7 +23,35 @@ def load_config(config_path: str) -> dict:
         config = yaml.safe_load(file)
     return config
 
-config_path = 'rob_config.yaml'
+def setup_openai(config: dict) -> Optional[str]:
+    """
+    Set up OpenAI configuration if API key is provided
+    
+    Args:
+        config (dict): Configuration dictionary
+        
+    Returns:
+        Optional[str]: API key if provided, None if not using OpenAI
+    """
+    openai_config = config.get("open_ai", {})
+    api_key = openai_config.get("api_key")
+    
+    if api_key and api_key != 'api_key':  # Check if a real key was provided
+        os.environ["OPENAI_API_KEY"] = api_key
+        print("OpenAI configuration loaded successfully")
+        return api_key
+    else:
+        print("No OpenAI API key provided - OpenAI features will be disabled")
+        return None
+
+# Load and set up configuration
+config_path = 'ai_config.yaml'
+config = load_config(config_path)
+openai_api_key = setup_openai(config)
+
+nlp = spacy.load("en_core_web_trf")
+
+embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
 
 config = load_config(config_path)
 hardware = config.get('hardware', 'GPU')
@@ -230,64 +250,94 @@ class DataImporter:
 
 #make llama ccp implementation, investigate onnx, make yaml switch for starting local llm as required.
 class AIProcessor:
-    def __init__(self, table_name, db_path = 'temp.db'):
+    def __init__(self, table_name: str, config_path: str, db_path: str = 'temp.db'):
         self.db_path = db_path
         self.table_name = table_name
-        self.client = OpenAI()
+        
+        # Load configuration
         with open(config_path, 'r') as file:
-            self.config = yaml.safe_load(file)  
-       
-    def process_table_llm(self, table_name, input_column, output_column, key, batch_size, system_prompt, user_prompt_template, rows_to_process='all'):
+            self.config = yaml.safe_load(file)
+        
+        # Initialize OpenAI client only if API key is provided
+        self.client = self._initialize_openai()
+        
+    def _initialize_openai(self) -> Optional[OpenAI]:
+        """Initialize OpenAI client if API key is available"""
+        openai_config = self.config.get("open_ai", {})
+        api_key = openai_config.get("api_key")
+        
+        if api_key and api_key != 'api_key':  # Check if a real key was provided
+            return OpenAI(api_key=api_key)
+        return None
+    
+    def _process_with_openai(self, system_prompt: str, user_prompt: str) -> str:
+        """Process text with OpenAI API"""
+        try:
+            output = self.client.chat.completions.create(
+                model="gpt-4-turbo-preview",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": user_prompt},
+                ],
+                temperature=0,
+            )
+            return output.choices[0].message.content if output.choices else 'unknown'
+        except Exception as e:
+            print(f"Error processing with OpenAI: {e}")
+            return 'error'
+    
+    def _process_without_openai(self, system_prompt: str, user_prompt: str) -> str:
+        """Fallback processing method when OpenAI is not available"""
+        return "OpenAI API key not provided - processing skipped"
+    
+    def process_table_llm(self, table_name: str, input_column: str, output_column: str, 
+                         key: str, batch_size: int, system_prompt: str, 
+                         user_prompt_template: str, rows_to_process: str | int = 'all'):
+        """Process table using LLM with the specified parameters"""
         conn = sqlite3.connect(self.db_path)
         cur = conn.cursor()
 
-    # Add new column to the original table if it doesn't exist
+        # Add new column if it doesn't exist
         try:
             cur.execute(f"ALTER TABLE {table_name} ADD COLUMN {output_column} TEXT")
         except sqlite3.OperationalError:
-        # Ignore if the column already exists
             pass
 
-    # Determine the total number of rows to process
+        # Get total rows
         total_rows = cur.execute(f"SELECT COUNT(*) FROM {table_name}").fetchone()[0]
-    
-        if rows_to_process == 'all':
-            rows_to_process = total_rows
-        else:
-            rows_to_process = min(int(rows_to_process), total_rows)
+        rows_to_process = (total_rows if rows_to_process == 'all' 
+                          else min(int(rows_to_process), total_rows))
 
-    # Create a tqdm progress bar
+        # Process rows with progress bar
         with tqdm(total=rows_to_process, desc="Processing rows", unit="row") as pbar:
-        # Process in batches
             for offset in range(0, rows_to_process, batch_size):
                 current_batch_size = min(batch_size, rows_to_process - offset)
-                cur.execute(f"SELECT {key}, {input_column} FROM {table_name} LIMIT {current_batch_size} OFFSET {offset}")
+                cur.execute(
+                    f"SELECT {key}, {input_column} FROM {table_name} "
+                    f"LIMIT {current_batch_size} OFFSET {offset}"
+                )
                 rows = cur.fetchall()
 
                 for row in rows:
-                    row_id, input_text = row  # Unpack the row
-                
-                # Use the text from the input column in the user prompt
+                    row_id, input_text = row
                     user_prompt = user_prompt_template.format(input_text=input_text)
-                
-                    output = self.client.chat.completions.create(
-                        model="gpt-4o-mini",
-                        messages=[
-                            {"role": "system", "content": system_prompt},
-                            {"role": "user", "content": user_prompt},
-                        ],
-                        temperature=0,
-                    )
-
-                    if output.choices:
-                        completion = output.choices[0].message.content
+                    
+                    # Process text using OpenAI if available, otherwise use fallback
+                    if self.client:
+                        completion = self._process_with_openai(
+                            system_prompt, user_prompt
+                        )
                     else:
-                        completion = 'unknown'
+                        completion = self._process_without_openai(
+                            system_prompt, user_prompt
+                        )
 
-                    cur.execute(f"UPDATE {table_name} SET {output_column} = ? WHERE {key} = ?", 
-                            (completion, row_id))
-                
-                # Update the progress bar
+                    # Update database
+                    cur.execute(
+                        f"UPDATE {table_name} SET {output_column} = ? "
+                        f"WHERE {key} = ?", 
+                        (completion, row_id)
+                    )
                     pbar.update(1)
 
                 conn.commit()
@@ -400,7 +450,6 @@ class AIProcessor:
             })
         return pd.DataFrame(topics_out)
     
-   
 
     def label_topic_clusters(self, topics_out):
     # Group by Topic and get the first occurrence of Representative Words and Docs
