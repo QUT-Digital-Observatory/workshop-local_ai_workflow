@@ -15,7 +15,7 @@ bertopic:
   min_topic_size: 10
   min_similarity: 0.7
 
-hardware: GPU
+hardware: CPU
 
 reddit:
   client_id: 'client_id'
