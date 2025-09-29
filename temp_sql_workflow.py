@@ -7,7 +7,7 @@ import os
 import json
 from tqdm import tqdm
 import spacy
-from openai import OpenAI
+#from openai import OpenAI
 import yaml
 from bertopic import BERTopic
 import torch
