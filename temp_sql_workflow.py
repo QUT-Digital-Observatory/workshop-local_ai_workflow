@@ -247,6 +247,59 @@ class DataImporter:
             print(f"Database file {self.db_path} has been removed.")
         else:
             print("The database file does not exist.")
+            
+    def semantic_search(self, query: str, top_n: int = 5, reranker_model: Optional[str] = None) -> pd.DataFrame:
+        """
+        Perform semantic search on the database using the provided query.
+        Optionally rerank results using a cross-encoder reranker.
+
+        Args:
+            query (str): The search query.
+            top_n (int): Number of top results to return.
+            reranker_model (str, optional): HuggingFace model name for reranking.
+
+        Returns:
+            pd.DataFrame: Top N most similar rows (reranked if reranker_model is provided).
+        """
+        # Encode the query
+        query_emb = self.embedding_model.encode([query], device=self.device)
+        if isinstance(query_emb, torch.Tensor):
+            query_emb = query_emb[0].cpu().numpy()
+        elif isinstance(query_emb, np.ndarray):
+            query_emb = query_emb[0]
+        else:
+            query_emb = np.array(query_emb[0])
+
+        # Connect to DB and fetch embeddings
+        conn = sqlite3.connect(self.db_path)
+        df = pd.read_sql_query(f"SELECT * FROM {self.table_name}", conn)
+        conn.close()
+
+        # Parse embeddings
+        embeddings = pd.Series([np.array(json.loads(x)) for x in df['embedding']])
+        # Compute cosine similarity
+        def cosine_similarity(a, b):
+            return np.dot(a, b) / (np.linalg.norm(a) * np.linalg.norm(b) + 1e-8)
+        similarities = embeddings.apply(lambda emb: cosine_similarity(query_emb, emb))
+
+        # Add similarity column and sort
+        df['similarity'] = similarities
+        top_results = df.sort_values('similarity', ascending=False).head(top_n)
+
+        # Rerank if reranker_model is provided (For demonstration, use a SentenceTransformer cross-encoder as reranker (e.g., 'cross-encoder/ms-marco-MiniLM-L-6-v2').
+        if reranker_model is not None:
+            if self.text_column is None:
+                raise ValueError("text_column is not set. Please import data first.")
+            from sentence_transformers import CrossEncoder
+            cross_encoder = CrossEncoder(reranker_model)
+            # Prepare pairs: (query, candidate_text)
+            pairs = [(query, str(row[self.text_column])) for _, row in top_results.iterrows()]
+            scores = cross_encoder.predict(pairs)
+            top_results = top_results.copy()
+            top_results['rerank_score'] = scores
+            top_results = top_results.sort_values('rerank_score', ascending=False)
+
+        return top_results
 
 #make llama ccp implementation, investigate onnx, make yaml switch for starting local llm as required.
 class AIProcessor:
@@ -350,7 +403,7 @@ class AIProcessor:
                             
                         try:
                             # Format the user prompt with the actual input text
-                            formatted_user_prompt = user_prompt_template.format(input_text=input_text)
+                            formatted_user_prompt = user_prompt_template.format(inputText=input_text)
                             
                             # Process text using OpenAI if available, otherwise use fallback
                             if self.client:
@@ -570,5 +623,5 @@ class AIProcessor:
                 break
 
     # Close connection
-        conn.close()        
+        conn.close()
 
